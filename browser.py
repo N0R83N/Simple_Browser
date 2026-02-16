@@ -1,612 +1,405 @@
+from __future__ import annotations
+
 import json
-import os
-import re
-import threading
-import time
-import tkinter as tk
-from dataclasses import asdict, dataclass, field
-from tkinter import filedialog, messagebox, simpledialog, ttk
-from urllib.parse import quote_plus, urlparse
+import sqlite3
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 
-import http.cookiejar
-import urllib.error
-import urllib.request
-
-
-CONFIG_FILE = "browser_config.json"
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+from PySide6.QtCore import QUrl, Qt
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtWebEngineCore import QWebEngineDownloadRequest, QWebEngineProfile, QWebEngineUrlRequestInterceptor
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QInputDialog,
+    QLineEdit,
+    QListWidget,
+    QMainWindow,
+    QMessageBox,
+    QSplitter,
+    QStatusBar,
+    QTabWidget,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
+try:
+    from platformdirs import user_cache_dir, user_config_dir, user_data_dir
+except ImportError:
+    # fallback when optional dependency is not installed
+    def user_data_dir(appname: str, appauthor: str) -> str:
+        return str(Path.home() / ".local" / "share" / appname)
+
+    def user_config_dir(appname: str, appauthor: str) -> str:
+        return str(Path.home() / ".config" / appname)
+
+    def user_cache_dir(appname: str, appauthor: str) -> str:
+        return str(Path.home() / ".cache" / appname)
+
+
+APP_NAME = "SimpleBrowser"
+APP_AUTHOR = "SimpleBrowser"
+
 
 @dataclass
-class BrowserSettings:
-    homepage: str = "https://example.org"
-    search_engine: str = "https://duckduckgo.com/?q={query}"
-    timeout: int = 15
-    font_family: str = "Consolas"
-    font_size: int = 11
-    bg_color: str = "#FFFFFF"
-    fg_color: str = "#111111"
-    auto_wrap_text: bool = True
-    show_line_numbers: bool = False
-    user_agent: str = DEFAULT_USER_AGENT
-
-
-@dataclass
-class TabState:
-    frame: tk.Frame
-    url_var: tk.StringVar
-    title_var: tk.StringVar
-    status_var: tk.StringVar
-    content_text: tk.Text
-    line_text: tk.Text
-    history: list[str] = field(default_factory=list)
-    history_index: int = -1
-    last_loaded_content: str = ""
-
-
-class AdvancedPythonBrowser:
-    """A customizable, multi-tab, text-centric browser built with Tkinter."""
-
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("Advanced Python Browser")
-        self.root.geometry("1200x800")
-
-        self.settings = self.load_settings()
-        self.bookmarks = self.load_bookmarks()
-
-        self.cookie_jar = http.cookiejar.CookieJar()
-        self.tabs: dict[str, TabState] = {}
-
-        self.build_ui()
-        self.add_tab(url=self.settings.homepage, switch=True)
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def build_ui(self) -> None:
-        self.style = ttk.Style()
-        self.style.theme_use("clam")
-
-        self.menu_bar = tk.Menu(self.root)
-        self.root.config(menu=self.menu_bar)
-
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True)
-        self.notebook.bind("<<NotebookTabChanged>>", self.sync_global_status)
-
-        self.status_var = tk.StringVar(value="Hazır")
-        self.status_bar = ttk.Label(self.root, textvariable=self.status_var, anchor="w")
-        self.status_bar.pack(fill="x")
-
-        self.create_file_menu()
-        self.create_navigation_menu()
-        self.create_bookmark_menu()
-        self.create_settings_menu()
-        self.create_tools_menu()
-
-    def create_file_menu(self) -> None:
-        file_menu = tk.Menu(self.menu_bar, tearoff=0)
-        file_menu.add_command(label="Yeni Sekme", command=lambda: self.add_tab(switch=True))
-        file_menu.add_command(label="Sekmeyi Kapat", command=self.close_current_tab)
-        file_menu.add_separator()
-        file_menu.add_command(label="Sayfayı Kaydet", command=self.save_current_page)
-        file_menu.add_command(label="İçeriği Temizle", command=self.clear_current_content)
-        file_menu.add_separator()
-        file_menu.add_command(label="Çıkış", command=self.on_close)
-        self.menu_bar.add_cascade(label="Dosya", menu=file_menu)
-
-    def create_navigation_menu(self) -> None:
-        nav_menu = tk.Menu(self.menu_bar, tearoff=0)
-        nav_menu.add_command(label="Geri", command=self.go_back)
-        nav_menu.add_command(label="İleri", command=self.go_forward)
-        nav_menu.add_command(label="Yenile", command=self.reload_current_tab)
-        nav_menu.add_command(label="Anasayfa", command=self.open_homepage)
-        self.menu_bar.add_cascade(label="Gezinme", menu=nav_menu)
-
-    def create_bookmark_menu(self) -> None:
-        self.bookmark_menu = tk.Menu(self.menu_bar, tearoff=0)
-        self.bookmark_menu.add_command(label="Mevcut Sayfayı Yer İmlerine Ekle", command=self.add_bookmark_from_current)
-        self.bookmark_menu.add_separator()
-        self.rebuild_bookmark_menu()
-        self.menu_bar.add_cascade(label="Yer İmleri", menu=self.bookmark_menu)
-
-    def create_settings_menu(self) -> None:
-        settings_menu = tk.Menu(self.menu_bar, tearoff=0)
-        settings_menu.add_command(label="Tarayıcı Ayarları", command=self.open_settings_dialog)
-        settings_menu.add_command(label="Tema Uygula", command=self.apply_theme_to_all_tabs)
-        settings_menu.add_command(label="Satır Numaralarını Aç/Kapat", command=self.toggle_line_numbers)
-        self.menu_bar.add_cascade(label="Ayarlar", menu=settings_menu)
-
-    def create_tools_menu(self) -> None:
-        tools_menu = tk.Menu(self.menu_bar, tearoff=0)
-        tools_menu.add_command(label="Kaynak Kodunu Gör", command=self.show_page_source)
-        tools_menu.add_command(label="Sayfada Bul", command=self.find_in_page)
-        tools_menu.add_command(label="Çerezleri Göster", command=self.show_cookies)
-        self.menu_bar.add_cascade(label="Araçlar", menu=tools_menu)
-
-    def add_tab(self, url: str = "", switch: bool = False) -> None:
-        frame = ttk.Frame(self.notebook)
-        top_bar = ttk.Frame(frame)
-        top_bar.pack(fill="x", padx=8, pady=8)
-
-        title_var = tk.StringVar(value="Yeni Sekme")
-        status_var = tk.StringVar(value="Hazır")
-        url_var = tk.StringVar(value=url or "")
-
-        back_btn = ttk.Button(top_bar, text="←", width=3, command=self.go_back)
-        forward_btn = ttk.Button(top_bar, text="→", width=3, command=self.go_forward)
-        reload_btn = ttk.Button(top_bar, text="⟳", width=3, command=self.reload_current_tab)
-        home_btn = ttk.Button(top_bar, text="⌂", width=3, command=self.open_homepage)
-
-        back_btn.pack(side="left", padx=2)
-        forward_btn.pack(side="left", padx=2)
-        reload_btn.pack(side="left", padx=2)
-        home_btn.pack(side="left", padx=2)
-
-        url_entry = ttk.Entry(top_bar, textvariable=url_var)
-        url_entry.pack(side="left", fill="x", expand=True, padx=6)
-        url_entry.bind("<Return>", lambda _e: self.load_from_entry())
-
-        go_btn = ttk.Button(top_bar, text="Git", command=self.load_from_entry)
-        stop_btn = ttk.Button(top_bar, text="Durdur", command=lambda: status_var.set("İstek iptal edildi (simülasyon)."))
-        go_btn.pack(side="left", padx=2)
-        stop_btn.pack(side="left", padx=2)
-
-        body_frame = ttk.Frame(frame)
-        body_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-
-        line_text = tk.Text(body_frame, width=5, padx=4, takefocus=0, border=0, background="#F0F0F0", state="disabled")
-        content_text = tk.Text(body_frame, wrap="word")
-        y_scroll = ttk.Scrollbar(body_frame, orient="vertical", command=self._on_scroll_factory(content_text, line_text))
-        x_scroll = ttk.Scrollbar(body_frame, orient="horizontal", command=content_text.xview)
-        content_text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-
-        line_text.pack(side="left", fill="y")
-        content_text.pack(side="left", fill="both", expand=True)
-        y_scroll.pack(side="right", fill="y")
-        x_scroll.pack(side="bottom", fill="x")
-
-        content_text.bind("<KeyRelease>", lambda _e: self.update_line_numbers_for_tab(self.current_tab()))
-        content_text.bind("<MouseWheel>", lambda _e: self.sync_line_scroll(content_text, line_text))
-
-        tab_state = TabState(
-            frame=frame,
-            url_var=url_var,
-            title_var=title_var,
-            status_var=status_var,
-            content_text=content_text,
-            line_text=line_text,
-        )
-
-        self.notebook.add(frame, text=title_var.get())
-        tab_id = self.notebook.tabs()[-1]
-        self.tabs[tab_id] = tab_state
-
-        self.apply_theme_to_tab(tab_state)
-        self.update_line_numbers_for_tab(tab_state)
-
-        if switch:
-            self.notebook.select(frame)
-
-        if url:
-            self.load_url(url)
-
-    def current_tab_id(self) -> str | None:
-        tabs = self.notebook.tabs()
-        if not tabs:
-            return None
-        return self.notebook.select()
-
-    def current_tab(self) -> TabState | None:
-        tab_id = self.current_tab_id()
-        if not tab_id:
-            return None
-        return self.tabs.get(tab_id)
-
-    def load_from_entry(self) -> None:
-        tab = self.current_tab()
-        if not tab:
-            return
-        self.load_url(tab.url_var.get().strip())
-
-    def normalize_url(self, text: str) -> str:
-        text = text.strip()
-        if not text:
-            return self.settings.homepage
-
-        parsed = urlparse(text)
-        if parsed.scheme in {"http", "https"}:
-            return text
-
-        if re.match(r"^[\w.-]+\.[a-zA-Z]{2,}(/.*)?$", text):
-            return f"https://{text}"
-
-        query = quote_plus(text)
-        return self.settings.search_engine.format(query=query)
-
-    def build_opener(self) -> urllib.request.OpenerDirector:
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
-        opener.addheaders = [("User-Agent", self.settings.user_agent)]
-        return opener
-
-    def load_url(self, raw_text: str, add_history: bool = True) -> None:
-        tab = self.current_tab()
-        if not tab:
-            return
-
-        target_url = self.normalize_url(raw_text)
-        tab.url_var.set(target_url)
-        tab.status_var.set("Yükleniyor...")
-        self.sync_global_status()
-
-        def worker() -> None:
-            started = time.time()
-            try:
-                opener = self.build_opener()
-                with opener.open(target_url, timeout=self.settings.timeout) as response:
-                    content_type = response.headers.get("Content-Type", "")
-                    raw = response.read()
-
-                text = raw.decode("utf-8", errors="replace")
-                elapsed = time.time() - started
-                self.root.after(
-                    0,
-                    lambda: self._handle_loaded_content(
-                        tab,
-                        target_url,
-                        text,
-                        content_type,
-                        elapsed,
-                        add_history,
-                    ),
-                )
-            except urllib.error.HTTPError as err:
-                self.root.after(0, lambda: self._handle_error(tab, f"HTTP Hatası: {err.code} - {err.reason}"))
-            except urllib.error.URLError as err:
-                self.root.after(0, lambda: self._handle_error(tab, f"Ağ Hatası: {err.reason}"))
-            except Exception as err:  # noqa: BLE001
-                self.root.after(0, lambda: self._handle_error(tab, f"Beklenmeyen Hata: {err}"))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _handle_loaded_content(
-        self,
-        tab: TabState,
-        url: str,
-        content: str,
-        content_type: str,
-        elapsed: float,
-        add_history: bool,
-    ) -> None:
-        tab.content_text.delete("1.0", tk.END)
-        tab.content_text.insert(tk.END, content)
-        tab.last_loaded_content = content
-
-        title = self.extract_title(content) or url
-        tab.title_var.set(title[:40])
-        tab.status_var.set(f"Yüklendi: {url} | {content_type or 'Bilinmiyor'} | {elapsed:.2f}s")
-
-        index = self.notebook.index(tab.frame)
-        self.notebook.tab(index, text=tab.title_var.get())
-
-        if add_history:
-            if tab.history_index < len(tab.history) - 1:
-                tab.history = tab.history[: tab.history_index + 1]
-            tab.history.append(url)
-            tab.history_index = len(tab.history) - 1
-
-        self.update_line_numbers_for_tab(tab)
-        self.sync_global_status()
-
-    def _handle_error(self, tab: TabState, message: str) -> None:
-        tab.content_text.delete("1.0", tk.END)
-        tab.content_text.insert(tk.END, message)
-        tab.status_var.set(message)
-        self.sync_global_status()
-
-    def extract_title(self, html: str) -> str:
-        match = re.search(r"<title>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
-        if not match:
-            return ""
-        return re.sub(r"\s+", " ", match.group(1)).strip()
-
-    def go_back(self) -> None:
-        tab = self.current_tab()
-        if not tab or tab.history_index <= 0:
-            return
-        tab.history_index -= 1
-        url = tab.history[tab.history_index]
-        tab.url_var.set(url)
-        self.load_url(url, add_history=False)
-
-    def go_forward(self) -> None:
-        tab = self.current_tab()
-        if not tab or tab.history_index >= len(tab.history) - 1:
-            return
-        tab.history_index += 1
-        url = tab.history[tab.history_index]
-        tab.url_var.set(url)
-        self.load_url(url, add_history=False)
-
-    def reload_current_tab(self) -> None:
-        tab = self.current_tab()
-        if tab:
-            self.load_url(tab.url_var.get(), add_history=False)
-
-    def open_homepage(self) -> None:
-        self.load_url(self.settings.homepage)
-
-    def close_current_tab(self) -> None:
-        tab_id = self.current_tab_id()
-        if not tab_id:
-            return
-        if len(self.notebook.tabs()) == 1:
-            messagebox.showinfo("Bilgi", "Son sekme kapatılamaz.")
-            return
-        self.notebook.forget(tab_id)
-        self.tabs.pop(tab_id, None)
-        self.sync_global_status()
-
-    def clear_current_content(self) -> None:
-        tab = self.current_tab()
-        if not tab:
-            return
-        tab.content_text.delete("1.0", tk.END)
-        tab.status_var.set("İçerik temizlendi.")
-        self.update_line_numbers_for_tab(tab)
-        self.sync_global_status()
-
-    def save_current_page(self) -> None:
-        tab = self.current_tab()
-        if not tab:
-            return
-
-        initial_name = (self.extract_title(tab.last_loaded_content) or "page").replace(" ", "_")
-        path = filedialog.asksaveasfilename(
-            title="Sayfayı Kaydet",
-            defaultextension=".html",
-            initialfile=f"{initial_name}.html",
-            filetypes=[("HTML", "*.html"), ("Text", "*.txt"), ("All", "*.*")],
-        )
-        if not path:
-            return
-
-        try:
-            with open(path, "w", encoding="utf-8") as file:
-                file.write(tab.content_text.get("1.0", tk.END))
-            tab.status_var.set(f"Kaydedildi: {path}")
-            self.sync_global_status()
-        except OSError as err:
-            messagebox.showerror("Hata", f"Dosya kaydedilemedi:\n{err}")
-
-    def find_in_page(self) -> None:
-        tab = self.current_tab()
-        if not tab:
-            return
-
-        target = simpledialog.askstring("Bul", "Aranacak metni girin:")
-        if not target:
-            return
-
-        text = tab.content_text
-        text.tag_remove("search_highlight", "1.0", tk.END)
-
-        start = "1.0"
-        count = 0
-        while True:
-            start = text.search(target, start, stopindex=tk.END, nocase=True)
-            if not start:
-                break
-            end = f"{start}+{len(target)}c"
-            text.tag_add("search_highlight", start, end)
-            start = end
-            count += 1
-
-        text.tag_config("search_highlight", background="#FFE08A", foreground="#000000")
-        tab.status_var.set(f"'{target}' için {count} sonuç bulundu.")
-        self.sync_global_status()
-
-    def show_page_source(self) -> None:
-        tab = self.current_tab()
-        if not tab:
-            return
-
-        source_window = tk.Toplevel(self.root)
-        source_window.title(f"Kaynak Kodu - {tab.url_var.get()}")
-        source_window.geometry("900x600")
-
-        source_text = tk.Text(source_window, wrap="none")
-        source_text.pack(fill="both", expand=True)
-        source_text.insert("1.0", tab.last_loaded_content or tab.content_text.get("1.0", tk.END))
-
-    def toggle_line_numbers(self) -> None:
-        self.settings.show_line_numbers = not self.settings.show_line_numbers
-        self.apply_theme_to_all_tabs()
-
-    def update_line_numbers_for_tab(self, tab: TabState | None) -> None:
-        if not tab:
-            return
-        content = tab.content_text.get("1.0", tk.END)
-        line_count = max(content.count("\n"), 1)
-        line_numbers = "\n".join(str(i) for i in range(1, line_count + 1))
-
-        tab.line_text.configure(state="normal")
-        tab.line_text.delete("1.0", tk.END)
-        tab.line_text.insert("1.0", line_numbers)
-        tab.line_text.configure(state="disabled")
-
-    def sync_line_scroll(self, content_text: tk.Text, line_text: tk.Text) -> None:
-        line_text.yview_moveto(content_text.yview()[0])
-
-    def _on_scroll_factory(self, content_text: tk.Text, line_text: tk.Text):
-        def _scroll(*args):
-            content_text.yview(*args)
-            line_text.yview(*args)
-
-        return _scroll
-
-    def apply_theme_to_tab(self, tab: TabState) -> None:
-        wrap_mode = "word" if self.settings.auto_wrap_text else "none"
-        tab.content_text.configure(
-            background=self.settings.bg_color,
-            foreground=self.settings.fg_color,
-            insertbackground=self.settings.fg_color,
-            font=(self.settings.font_family, self.settings.font_size),
-            wrap=wrap_mode,
-        )
-
-        if self.settings.show_line_numbers:
-            tab.line_text.pack(side="left", fill="y")
-        else:
-            tab.line_text.pack_forget()
-
-    def apply_theme_to_all_tabs(self) -> None:
-        for tab in self.tabs.values():
-            self.apply_theme_to_tab(tab)
-            self.update_line_numbers_for_tab(tab)
-        self.sync_global_status()
-
-    def open_settings_dialog(self) -> None:
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Tarayıcı Ayarları")
-        dialog.geometry("520x460")
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        fields: dict[str, tk.Entry] = {}
-
-        def add_entry(label: str, value: str):
-            container = ttk.Frame(dialog)
-            container.pack(fill="x", padx=12, pady=6)
-            ttk.Label(container, text=label, width=20).pack(side="left")
-            entry = ttk.Entry(container)
-            entry.insert(0, value)
-            entry.pack(side="left", fill="x", expand=True)
-            fields[label] = entry
-
-        add_entry("Anasayfa", self.settings.homepage)
-        add_entry("Arama Motoru", self.settings.search_engine)
-        add_entry("Timeout (sn)", str(self.settings.timeout))
-        add_entry("Yazı Tipi", self.settings.font_family)
-        add_entry("Yazı Boyutu", str(self.settings.font_size))
-        add_entry("Arka Plan", self.settings.bg_color)
-        add_entry("Yazı Rengi", self.settings.fg_color)
-        add_entry("User-Agent", self.settings.user_agent)
-
-        wrap_var = tk.BooleanVar(value=self.settings.auto_wrap_text)
-        ttk.Checkbutton(dialog, text="Metni satırda sar", variable=wrap_var).pack(anchor="w", padx=12, pady=4)
-
-        def save() -> None:
-            try:
-                self.settings.homepage = fields["Anasayfa"].get().strip() or self.settings.homepage
-                self.settings.search_engine = fields["Arama Motoru"].get().strip() or self.settings.search_engine
-                self.settings.timeout = max(2, int(fields["Timeout (sn)"].get().strip()))
-                self.settings.font_family = fields["Yazı Tipi"].get().strip() or self.settings.font_family
-                self.settings.font_size = max(8, int(fields["Yazı Boyutu"].get().strip()))
-                self.settings.bg_color = fields["Arka Plan"].get().strip() or self.settings.bg_color
-                self.settings.fg_color = fields["Yazı Rengi"].get().strip() or self.settings.fg_color
-                self.settings.user_agent = fields["User-Agent"].get().strip() or DEFAULT_USER_AGENT
-                self.settings.auto_wrap_text = wrap_var.get()
-            except ValueError:
-                messagebox.showerror("Hata", "Sayı alanlarına geçerli değer girin.")
+class BrowserPaths:
+    data_dir: Path
+    config_dir: Path
+    cache_dir: Path
+    db_path: Path
+    settings_path: Path
+
+
+class AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
+    def __init__(self, blocked_domains: set[str]) -> None:
+        super().__init__()
+        self.blocked_domains = blocked_domains
+
+    def interceptRequest(self, info) -> None:  # type: ignore[override]
+        host = info.requestUrl().host().lower()
+        for blocked in self.blocked_domains:
+            if host == blocked or host.endswith(f".{blocked}"):
+                info.block(True)
                 return
 
-            self.apply_theme_to_all_tabs()
-            self.save_settings()
-            dialog.destroy()
 
-        ttk.Button(dialog, text="Kaydet", command=save).pack(side="right", padx=12, pady=10)
+class BrowserStorage:
+    def __init__(self, paths: BrowserPaths) -> None:
+        self.paths = paths
+        self.connection = sqlite3.connect(self.paths.db_path)
+        self._prepare_tables()
 
-    def show_cookies(self) -> None:
-        cookies = [f"{c.name}={c.value}; domain={c.domain}; path={c.path}" for c in self.cookie_jar]
-        message = "\n".join(cookies) if cookies else "Kayıtlı çerez yok."
-        messagebox.showinfo("Çerezler", message)
-
-    def add_bookmark_from_current(self) -> None:
-        tab = self.current_tab()
-        if not tab:
-            return
-
-        title = simpledialog.askstring("Yer İmi", "Başlık:", initialvalue=tab.title_var.get())
-        if not title:
-            return
-
-        url = tab.url_var.get().strip()
-        if not url:
-            messagebox.showwarning("Uyarı", "Geçerli bir URL yok.")
-            return
-
-        self.bookmarks.append({"title": title.strip(), "url": url})
-        self.save_bookmarks()
-        self.rebuild_bookmark_menu()
-
-    def rebuild_bookmark_menu(self) -> None:
-        while self.bookmark_menu.index("end") and self.bookmark_menu.index("end") >= 2:
-            self.bookmark_menu.delete(2)
-
-        if not self.bookmarks:
-            self.bookmark_menu.add_command(label="(Yer imi yok)", state="disabled")
-            return
-
-        for bookmark in self.bookmarks:
-            self.bookmark_menu.add_command(
-                label=bookmark["title"],
-                command=lambda u=bookmark["url"]: self.load_url(u),
+    def _prepare_tables(self) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE
             )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                url TEXT NOT NULL,
+                visited_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.connection.commit()
 
-    def sync_global_status(self, *_args) -> None:
-        tab = self.current_tab()
-        self.status_var.set(tab.status_var.get() if tab else "Hazır")
+    def add_bookmark(self, title: str, url: str) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO bookmarks(title, url) VALUES(?, ?)",
+            (title or url, url),
+        )
+        self.connection.commit()
 
-    def load_settings(self) -> BrowserSettings:
-        if not os.path.exists(CONFIG_FILE):
-            return BrowserSettings()
+    def list_bookmarks(self) -> list[tuple[str, str]]:
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT title, url FROM bookmarks ORDER BY id DESC")
+        return cursor.fetchall()
 
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as file:
-                data = json.load(file)
-            return BrowserSettings(**data)
-        except (json.JSONDecodeError, TypeError, OSError):
-            return BrowserSettings()
+    def add_history(self, title: str, url: str) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute("INSERT INTO history(title, url) VALUES(?, ?)", (title, url))
+        self.connection.commit()
 
-    def save_settings(self) -> None:
-        try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as file:
-                json.dump(asdict(self.settings), file, ensure_ascii=False, indent=2)
-        except OSError as err:
-            messagebox.showwarning("Uyarı", f"Ayarlar kaydedilemedi: {err}")
+    def list_history(self, limit: int = 200) -> list[tuple[str, str]]:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "SELECT COALESCE(title, url), url FROM history ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        return cursor.fetchall()
 
-    def load_bookmarks(self) -> list[dict[str, str]]:
-        bookmark_file = "bookmarks.json"
-        if not os.path.exists(bookmark_file):
-            return []
 
-        try:
-            with open(bookmark_file, "r", encoding="utf-8") as file:
-                data = json.load(file)
-            if isinstance(data, list):
-                return [item for item in data if isinstance(item, dict) and "url" in item and "title" in item]
-            return []
-        except (json.JSONDecodeError, OSError):
-            return []
+class Sidebar(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        self.bookmarks = QListWidget()
+        self.history = QListWidget()
+        self.bookmarks.setAlternatingRowColors(True)
+        self.history.setAlternatingRowColors(True)
+        self.bookmarks.setToolTip("Bookmarks")
+        self.history.setToolTip("History")
+        layout.addWidget(self.bookmarks)
+        layout.addWidget(self.history)
 
-    def save_bookmarks(self) -> None:
-        try:
-            with open("bookmarks.json", "w", encoding="utf-8") as file:
-                json.dump(self.bookmarks, file, ensure_ascii=False, indent=2)
-        except OSError as err:
-            messagebox.showerror("Hata", f"Yer imleri kaydedilemedi: {err}")
 
-    def on_close(self) -> None:
-        self.save_settings()
-        self.save_bookmarks()
-        self.root.destroy()
+class BrowserWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.paths = self._prepare_paths()
+        self.settings = self._load_settings()
+        self.storage = BrowserStorage(self.paths)
+        self.profile = self._build_profile()
+
+        self.setWindowTitle("Simple Browser - PySide6")
+        self.resize(1280, 800)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabsClosable(True)
+        self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self.sync_urlbar)
+
+        self.sidebar = Sidebar()
+        self.sidebar.bookmarks.itemDoubleClicked.connect(
+            lambda item: self.navigate(item.data(Qt.UserRole))
+        )
+        self.sidebar.history.itemDoubleClicked.connect(
+            lambda item: self.navigate(item.data(Qt.UserRole))
+        )
+
+        splitter = QSplitter()
+        splitter.addWidget(self.sidebar)
+        splitter.addWidget(self.tabs)
+        splitter.setSizes([280, 1000])
+        self.setCentralWidget(splitter)
+
+        self._build_toolbar()
+        self._build_shortcuts()
+
+        self.setStatusBar(QStatusBar())
+        self.profile.downloadRequested.connect(self.handle_download)
+
+        self.add_tab(QUrl("https://www.google.com"), "Yeni Sekme")
+        self.refresh_sidebar()
+
+    def _prepare_paths(self) -> BrowserPaths:
+        data_dir = Path(user_data_dir(APP_NAME, APP_AUTHOR))
+        config_dir = Path(user_config_dir(APP_NAME, APP_AUTHOR))
+        cache_dir = Path(user_cache_dir(APP_NAME, APP_AUTHOR))
+        data_dir.mkdir(parents=True, exist_ok=True)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return BrowserPaths(
+            data_dir=data_dir,
+            config_dir=config_dir,
+            cache_dir=cache_dir,
+            db_path=data_dir / "browser.db",
+            settings_path=config_dir / "settings.json",
+        )
+
+    def _load_settings(self) -> dict:
+        default = {
+            "search_engine": "https://duckduckgo.com/?q={query}",
+            "blocked_domains": ["doubleclick.net", "googlesyndication.com"],
+            "homepage": "https://www.google.com",
+        }
+        if self.paths.settings_path.exists():
+            with self.paths.settings_path.open("r", encoding="utf-8") as fp:
+                default.update(json.load(fp))
+        return default
+
+    def _save_settings(self) -> None:
+        with self.paths.settings_path.open("w", encoding="utf-8") as fp:
+            json.dump(self.settings, fp, indent=2, ensure_ascii=False)
+
+    def _build_profile(self) -> QWebEngineProfile:
+        profile = QWebEngineProfile("main", self)
+        profile.setPersistentStoragePath(str(self.paths.data_dir / "profile"))
+        profile.setCachePath(str(self.paths.cache_dir / "webcache"))
+        profile.setPersistentCookiesPolicy(QWebEngineProfile.ForcePersistentCookies)
+        interceptor = AdBlockInterceptor(set(self.settings.get("blocked_domains", [])))
+        profile.setUrlRequestInterceptor(interceptor)
+        self.interceptor = interceptor
+        return profile
+
+    def _build_toolbar(self) -> None:
+        toolbar = QToolBar("Navigation")
+        self.addToolBar(toolbar)
+
+        back_action = QAction("←", self)
+        back_action.triggered.connect(lambda: self.current_view().back())
+        toolbar.addAction(back_action)
+
+        next_action = QAction("→", self)
+        next_action.triggered.connect(lambda: self.current_view().forward())
+        toolbar.addAction(next_action)
+
+        reload_action = QAction("⟳", self)
+        reload_action.triggered.connect(lambda: self.current_view().reload())
+        toolbar.addAction(reload_action)
+
+        home_action = QAction("Home", self)
+        home_action.triggered.connect(
+            lambda: self.navigate(self.settings.get("homepage", "https://www.google.com"))
+        )
+        toolbar.addAction(home_action)
+
+        self.url_bar = QLineEdit()
+        self.url_bar.returnPressed.connect(self.navigate_from_bar)
+        toolbar.addWidget(self.url_bar)
+
+        bookmark_action = QAction("★", self)
+        bookmark_action.triggered.connect(self.add_bookmark)
+        toolbar.addAction(bookmark_action)
+
+        menu_toolbar = QToolBar("Tools")
+        self.addToolBar(menu_toolbar)
+
+        new_tab_action = QAction("Yeni Sekme", self)
+        new_tab_action.triggered.connect(lambda: self.add_tab())
+        menu_toolbar.addAction(new_tab_action)
+
+        settings_action = QAction("Ayarlar", self)
+        settings_action.triggered.connect(self.configure_settings)
+        menu_toolbar.addAction(settings_action)
+
+    def _build_shortcuts(self) -> None:
+        QShortcut(QKeySequence("Ctrl+L"), self, activated=self.url_bar.setFocus)
+        QShortcut(QKeySequence("Ctrl+T"), self, activated=lambda: self.add_tab())
+        QShortcut(
+            QKeySequence("Ctrl+W"), self, activated=lambda: self.close_tab(self.tabs.currentIndex())
+        )
+        QShortcut(QKeySequence("Ctrl+R"), self, activated=lambda: self.current_view().reload())
+
+    def add_tab(self, qurl: Optional[QUrl] = None, label: str = "Yeni Sekme") -> None:
+        if qurl is None:
+            qurl = QUrl(self.settings.get("homepage", "https://www.google.com"))
+
+        browser = QWebEngineView()
+        page = browser.page()
+        page.setProfile(self.profile)
+        browser.setUrl(qurl)
+
+        index = self.tabs.addTab(browser, label)
+        self.tabs.setCurrentIndex(index)
+
+        browser.urlChanged.connect(lambda url, b=browser: self.update_urlbar(url, b))
+        browser.titleChanged.connect(lambda title, b=browser: self.update_tab_title(title, b))
+        browser.loadFinished.connect(lambda ok, b=browser: self.on_load_finished(ok, b))
+
+    def current_view(self) -> QWebEngineView:
+        return self.tabs.currentWidget()
+
+    def close_tab(self, index: int) -> None:
+        if self.tabs.count() == 1:
+            return
+        self.tabs.removeTab(index)
+
+    def navigate_from_bar(self) -> None:
+        self.navigate(self.url_bar.text())
+
+    def navigate(self, text: str) -> None:
+        if " " in text or "." not in text:
+            template = self.settings.get("search_engine", "https://duckduckgo.com/?q={query}")
+            target = template.format(query=text.replace(" ", "+"))
+        else:
+            target = text if text.startswith(("http://", "https://")) else f"https://{text}"
+        self.current_view().setUrl(QUrl(target))
+
+    def update_urlbar(self, qurl: QUrl, browser: QWebEngineView) -> None:
+        if browser != self.current_view():
+            return
+        self.url_bar.setText(qurl.toString())
+        self.url_bar.setCursorPosition(0)
+
+    def sync_urlbar(self, _: int) -> None:
+        current = self.current_view()
+        if current:
+            self.url_bar.setText(current.url().toString())
+
+    def update_tab_title(self, title: str, browser: QWebEngineView) -> None:
+        index = self.tabs.indexOf(browser)
+        if index >= 0:
+            self.tabs.setTabText(index, title[:25] or "Yeni Sekme")
+
+    def on_load_finished(self, ok: bool, browser: QWebEngineView) -> None:
+        if not ok:
+            self.statusBar().showMessage("Sayfa yüklenemedi", 3000)
+            return
+        title = browser.title() or browser.url().toString()
+        url = browser.url().toString()
+        self.storage.add_history(title, url)
+        self.refresh_sidebar()
+
+    def add_bookmark(self) -> None:
+        current = self.current_view()
+        if not current:
+            return
+        self.storage.add_bookmark(current.title() or current.url().toString(), current.url().toString())
+        self.refresh_sidebar()
+        self.statusBar().showMessage("Yer imi eklendi", 2000)
+
+    def refresh_sidebar(self) -> None:
+        self.sidebar.bookmarks.clear()
+        for title, url in self.storage.list_bookmarks():
+            self._add_list_item(self.sidebar.bookmarks, title, url)
+
+        self.sidebar.history.clear()
+        for title, url in self.storage.list_history():
+            self._add_list_item(self.sidebar.history, title, url)
+
+    def _add_list_item(self, widget: QListWidget, text: str, url: str) -> None:
+        from PySide6.QtWidgets import QListWidgetItem
+
+        item = QListWidgetItem(text)
+        item.setData(Qt.UserRole, url)
+        item.setToolTip(url)
+        widget.addItem(item)
+
+    def handle_download(self, item: QWebEngineDownloadRequest) -> None:
+        suggested = item.downloadFileName() or "download.bin"
+        target, _ = QFileDialog.getSaveFileName(self, "Dosyayı Kaydet", suggested)
+        if not target:
+            item.cancel()
+            return
+        item.setDownloadDirectory(str(Path(target).parent))
+        item.setDownloadFileName(Path(target).name)
+        item.accept()
+        item.receivedBytesChanged.connect(
+            lambda: self.statusBar().showMessage(
+                f"İndiriliyor: {item.receivedBytes()}/{item.totalBytes()} bytes"
+            )
+        )
+
+    def configure_settings(self) -> None:
+        current_search = self.settings.get("search_engine", "")
+        new_search, ok = QInputDialog.getText(
+            self,
+            "Arama Motoru",
+            "Arama URL şablonu ({query} kullanılmalı):",
+            text=current_search,
+        )
+        if ok and "{query}" in new_search:
+            self.settings["search_engine"] = new_search
+
+        current_blocked = ", ".join(self.settings.get("blocked_domains", []))
+        blocked_text, ok = QInputDialog.getText(
+            self,
+            "Reklam Engelleme",
+            "Engellenecek domainler (virgülle):",
+            text=current_blocked,
+        )
+        if ok:
+            blocked = [x.strip() for x in blocked_text.split(",") if x.strip()]
+            self.settings["blocked_domains"] = blocked
+            self.interceptor.blocked_domains = set(blocked)
+
+        self._save_settings()
+        QMessageBox.information(self, "Ayarlar", "Ayarlar kaydedildi.")
+
+
+def main() -> None:
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    window = BrowserWindow()
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = AdvancedPythonBrowser(root)
-    root.mainloop()
+    main()

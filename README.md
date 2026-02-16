@@ -1,40 +1,37 @@
-# Advanced Python Browser (Tkinter)
+# Simple Browser (PySide6 + QtWebEngine)
 
-Bu proje, Python `tkinter` tabanlı, çok sekmeli ve detaylı ayar seçeneklerine sahip gelişmiş bir metin odaklı tarayıcıdır.
+Bu proje, `PySide6 + QtWebEngine (Chromium)` tabanlı Python odaklı bir masaüstü tarayıcı iskeleti sunar.
 
-## Öne Çıkan Özellikler
+## Eklenen ana özellikler
 
-- Çoklu sekme yönetimi (yeni sekme, sekme kapatma)
-- Geri / ileri / yenile / anasayfa navigasyonu
-- URL veya arama sorgusunu otomatik algılama
-- Ayarlanabilir:
-  - Anasayfa
-  - Arama motoru URL şablonu
-  - Ağ timeout süresi
-  - User-Agent
-  - Yazı tipi ailesi ve boyutu
-  - Arka plan / yazı rengi
-  - Satır kaydırma modu
-  - Satır numarası görünürlüğü
-- Yer imleri (ekleme, kalıcı kayıt, menüden açma)
-- Çerez gösterimi
-- Kaynak kod görüntüleme
-- Sayfada metin arama ve vurgulama
-- Sayfayı dosyaya kaydetme
-- Ayarların JSON dosyasına kalıcı kaydı
+- Sekme yönetimi (yeni sekme, kapatma)
+- URL bar + arama motoru fallback (metin girildiğinde arama)
+- Geri/ileri/yenile/home navigasyonu
+- Kısayollar (`Ctrl+T`, `Ctrl+W`, `Ctrl+L`, `Ctrl+R`)
+- Yer imleri (SQLite)
+- Geçmiş (SQLite)
+- Download manager (Qt download sinyalleri ile)
+- Basit reklam engelleme (domain bazlı interceptor)
+- Profil, cookie ve cache path yönetimi (`QWebEngineProfile`)
+- Ayarlar ekranı (arama motoru şablonu + engelli domain listesi)
+
+> Not: Bu sürüm “tam tarayıcı” yolunda temel altyapıyı kurar. Uzantı sistemi, şifre yöneticisi entegrasyonu, gelişmiş devtools/debug ve gelişmiş download kuyruğu gibi başlıklar için `requirements.txt` içinde önerilen paketler ayrıca listelenmiştir.
+
+## Kurulum
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
 ## Çalıştırma
 
 ```bash
-python3 browser.py
+python browser.py
 ```
 
 ## Dosyalar
 
-- `browser.py`: Ana tarayıcı uygulaması
-- `browser_config.json`: Otomatik oluşan ayar dosyası
-- `bookmarks.json`: Otomatik oluşan yer imi dosyası
-
-## Not
-
-Bu tarayıcı bir **metin/HTML kaynak görüntüleyici** yaklaşımıyla çalışır; modern web tarayıcılarındaki JavaScript render motoruna sahip değildir.
+- `browser.py`: Ana uygulama
+- `requirements.txt`: Çekirdek + önerilen + opsiyonel Python bağımlılıkları
